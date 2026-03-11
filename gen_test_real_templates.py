@@ -1033,7 +1033,12 @@ def collect_stub_headers(scenario_doc: dict) -> List[str]:
     return unique_keep_order(scenario_doc.get("stub_headers", []))
 
 
-def emit_test_c(scenario_doc: dict, include_root: Optional[str], stub_include_prefix: str) -> str:
+def emit_test_c(
+    scenario_doc: dict,
+    include_root: Optional[str],
+    stub_include_prefix: str,
+    test_tools_header: str,
+) -> str:
     module = scenario_doc["module"]
     header_inc = rel_include(scenario_doc["header"], include_root)
     stub_headers = collect_stub_headers(scenario_doc)
@@ -1044,7 +1049,7 @@ def emit_test_c(scenario_doc: dict, include_root: Optional[str], stub_include_pr
     lines.append("#include <setjmp.h>")
     lines.append("#include <cmocka.h>")
     lines.append("")
-    lines.append('#include "tools.h"')
+    lines.append(f'#include "{test_tools_header}"')
     lines.append(f'#include "{header_inc}"')
 
     for hdr in stub_headers:
@@ -1206,6 +1211,11 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--tests-dir", default="tests", help="Tests base directory for Makefile")
     ap.add_argument("--stub-generated-dir", default="tests/stub/generated", help="Generated stub directory")
     ap.add_argument("--stub-include-prefix", default="", help='Prefix used in generated test C for stub headers')
+    ap.add_argument(
+        "--test-tools-header",
+        default="test_tools.h",
+        help='Header path to include for TEST_TOOLS_H macros, e.g. "tests/test_tools.h"',
+    )
     ap.add_argument("--extra-real-src", action="append", default=[], help="Additional real source files to compile")
     ap.add_argument("--extra-cflags", default="", help="Extra CFLAGS for Makefile")
     ap.add_argument("--extra-ldflags", default="", help="Extra LDFLAGS for Makefile")
@@ -1258,7 +1268,15 @@ def main() -> int:
         runner_c_path = os.path.join(args.out_dir, f"runner_{module}_real.c")
         makefile_path = os.path.join(args.out_dir, f"Makefile.{module}.real")
 
-        write_file(test_c_path, emit_test_c(merged_doc, args.include_root, args.stub_include_prefix))
+        write_file(
+            test_c_path,
+            emit_test_c(
+                merged_doc,
+                args.include_root,
+                args.stub_include_prefix,
+                args.test_tools_header,
+            ),
+        )
         write_file(runner_c_path, emit_runner_c(module))
         write_file(
             makefile_path,
