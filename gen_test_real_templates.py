@@ -2,13 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-summary: Generate dependency-aware real implementation cmocka test templates from C header/source files
+summary: Generate dependency-aware real implementation cmocka test templates from C headers/sources
 function: Parse public API prototypes, analyze C source bodies for dependency calls, inspect generated stub headers for exported symbols, and emit scenario JSON, auto test C, runner C, and per-module Makefile
 file: gen_test_real_templates.py
 tags: [test, generator, cmocka, real-unit-test, scenario, c, cortex]
 inputs:
-  - header file path
-  - source file path
+  - header file path or directory
+  - source file path (optional, single-file mode)
+  - source root directory (optional, directory mode)
   - include root
   - scenario directory
   - output directory
@@ -127,6 +128,59 @@ def rel_include(path: str, include_root: Optional[str]) -> str:
         except ValueError:
             pass
     return os.path.basename(path)
+
+
+def list_files_with_ext(path: str, ext: str) -> List[str]:
+    if os.path.isfile(path):
+        return [path] if path.endswith(ext) else []
+
+    out = []
+    for root, _, files in os.walk(path):
+        for fn in files:
+            if fn.endswith(ext):
+                out.append(os.path.join(root, fn))
+    out.sort()
+    return out
+
+
+def list_header_files(path: str) -> List[str]:
+    return list_files_with_ext(path, ".h")
+
+
+def list_source_files(path: str) -> List[str]:
+    return list_files_with_ext(path, ".c")
+
+
+def resolve_header_source_pairs(input_path: str, source_root: Optional[str]) -> List[Tuple[str, str]]:
+    headers = list_header_files(input_path)
+    if not headers:
+        return []
+
+    scan_root = source_root or input_path
+    sources = list_source_files(scan_root)
+    if not sources:
+        return []
+
+    src_map: Dict[str, List[str]] = {}
+    for src in sources:
+        key = sanitize_basename(src)
+        src_map.setdefault(key, []).append(src)
+
+    pairs: List[Tuple[str, str]] = []
+    for hdr in headers:
+        key = sanitize_basename(hdr)
+        candidates = src_map.get(key, [])
+        if not candidates:
+            continue
+
+        if len(candidates) == 1:
+            chosen = candidates[0]
+        else:
+            chosen = sorted(candidates, key=lambda p: (len(p), p))[0]
+            eprint(f"[warn] multiple sources for {hdr}; using {chosen}")
+        pairs.append((hdr, chosen))
+
+    return pairs
 
 
 def normalize_type(t: str) -> str:
@@ -1130,8 +1184,21 @@ def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description="Generate REAL implementation cmocka test templates from one header/source pair."
     )
-    ap.add_argument("header", help="Public header path, e.g. include/cortex/model/dcop.h")
-    ap.add_argument("source", help="Real source path, e.g. src/model/dcop.c")
+    ap.add_argument(
+        "input_path",
+        help="Header file or directory containing .h files",
+    )
+    ap.add_argument(
+        "source_path",
+        nargs="?",
+        default=None,
+        help="Optional real source path for single-file mode (legacy)",
+    )
+    ap.add_argument(
+        "--source-root",
+        default=None,
+        help="Directory to scan for .c files in directory mode (defaults to input_path)",
+    )
     ap.add_argument("--scenario-dir", default="tests/scenarios_real", help="Scenario JSON output directory")
     ap.add_argument("--out-dir", default="tests/auto_real", help="Generated C output directory")
     ap.add_argument("--include-root", default=None, help="Include root used for emitted #include paths")
@@ -1150,67 +1217,96 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
-    header_text = read_file(args.header)
-    source_text = read_file(args.source)
+    if args.source_path:
+        pairs = [(args.input_path, args.source_path)]
+    else:
+        pairs = resolve_header_source_pairs(args.input_path, args.source_root)
 
-    protos = parse_prototypes(header_text, args.header)
-    if not protos:
-        eprint(f"No supported prototypes found in header: {args.header}")
+    if not pairs:
+        eprint(f"No header/source pairs found from input: {args.input_path}")
         return 1
 
-    default_doc = build_default_scenario_doc(
-        header_path=args.header,
-        source_path=args.source,
-        protos=protos,
-        source_text=source_text,
-        stub_generated_dir=args.stub_generated_dir
-    )
+    gen_count = 0
+    total_tests = 0
 
-    module = default_doc["module"]
-    scenario_path = os.path.join(args.scenario_dir, f"{module}.real.scenario.json")
-    existing_doc = read_json(scenario_path) if os.path.exists(scenario_path) else None
-    merged_doc = merge_scenarios(default_doc, existing_doc)
+    for header_path, source_path in pairs:
+        header_text = read_file(header_path)
+        source_text = read_file(source_path)
 
-    write_json(scenario_path, merged_doc)
+        protos = parse_prototypes(header_text, header_path)
+        if not protos:
+            if args.emit_summary:
+                eprint(f"[skip] {header_path}: no supported prototypes")
+            continue
 
-    test_c_path = os.path.join(args.out_dir, f"test_{module}_real_auto.c")
-    runner_c_path = os.path.join(args.out_dir, f"runner_{module}_real.c")
-    makefile_path = os.path.join(args.out_dir, f"Makefile.{module}.real")
-
-    write_file(test_c_path, emit_test_c(merged_doc, args.include_root, args.stub_include_prefix))
-    write_file(runner_c_path, emit_runner_c(module))
-    write_file(
-        makefile_path,
-        emit_makefile(
-            module=module,
-            source_path=args.source,
-            out_dir=args.out_dir,
-            tests_dir=args.tests_dir,
-            include_dir=args.include_dir,
+        default_doc = build_default_scenario_doc(
+            header_path=header_path,
+            source_path=source_path,
+            protos=protos,
+            source_text=source_text,
             stub_generated_dir=args.stub_generated_dir,
-            dependency_stub_sources=merged_doc.get("stub_sources", []),
-            extra_real_srcs=args.extra_real_src,
-            extra_cflags=args.extra_cflags,
-            extra_ldflags=args.extra_ldflags,
-            cmocka_lib=args.cmocka_lib
         )
-    )
 
-    if args.emit_summary:
-        total_tests = 0
+        module = default_doc["module"]
+        scenario_path = os.path.join(args.scenario_dir, f"{module}.real.scenario.json")
+        existing_doc = read_json(scenario_path) if os.path.exists(scenario_path) else None
+        merged_doc = merge_scenarios(default_doc, existing_doc)
+
+        write_json(scenario_path, merged_doc)
+
+        test_c_path = os.path.join(args.out_dir, f"test_{module}_real_auto.c")
+        runner_c_path = os.path.join(args.out_dir, f"runner_{module}_real.c")
+        makefile_path = os.path.join(args.out_dir, f"Makefile.{module}.real")
+
+        write_file(test_c_path, emit_test_c(merged_doc, args.include_root, args.stub_include_prefix))
+        write_file(runner_c_path, emit_runner_c(module))
+        write_file(
+            makefile_path,
+            emit_makefile(
+                module=module,
+                source_path=source_path,
+                out_dir=args.out_dir,
+                tests_dir=args.tests_dir,
+                include_dir=args.include_dir,
+                stub_generated_dir=args.stub_generated_dir,
+                dependency_stub_sources=merged_doc.get("stub_sources", []),
+                extra_real_srcs=args.extra_real_src,
+                extra_cflags=args.extra_cflags,
+                extra_ldflags=args.extra_ldflags,
+                cmocka_lib=args.cmocka_lib,
+            ),
+        )
+
+        enabled_tests = 0
         for fn in merged_doc.get("functions", []):
             if not fn.get("enabled", True):
                 continue
             for sc in fn.get("scenarios", []):
                 if sc.get("enabled", True):
-                    total_tests += 1
+                    enabled_tests += 1
 
-        eprint(f"[ok] module    : {module}")
-        eprint(f"[ok] scenario  : {scenario_path}")
-        eprint(f"[ok] test      : {test_c_path}")
-        eprint(f"[ok] runner    : {runner_c_path}")
-        eprint(f"[ok] makefile  : {makefile_path}")
-        eprint(f"[ok] tests     : {total_tests}")
+        gen_count += 1
+        total_tests += enabled_tests
+
+        if args.emit_summary:
+            eprint(f"[ok] module    : {module}")
+            eprint(f"[ok] header    : {header_path}")
+            eprint(f"[ok] source    : {source_path}")
+            eprint(f"[ok] scenario  : {scenario_path}")
+            eprint(f"[ok] test      : {test_c_path}")
+            eprint(f"[ok] runner    : {runner_c_path}")
+            eprint(f"[ok] makefile  : {makefile_path}")
+            eprint(f"[ok] tests     : {enabled_tests}")
+
+    if gen_count == 0:
+        eprint("No modules generated (all headers skipped).")
+        return 1
+
+    if args.emit_summary:
+        eprint("")
+        eprint("==== Summary ====")
+        eprint(f"Modules generated: {gen_count}")
+        eprint(f"Tests generated  : {total_tests}")
 
     return 0
 
