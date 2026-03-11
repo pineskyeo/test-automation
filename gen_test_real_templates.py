@@ -31,7 +31,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass, asdict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set
 
 
 # =========================================================
@@ -268,6 +268,48 @@ def unique_keep_order(items: List[str]) -> List[str]:
     return out
 
 
+def _is_within_dir(path: str, root_dir: str) -> bool:
+    path_real = os.path.realpath(path)
+    root_real = os.path.realpath(root_dir)
+    try:
+        return os.path.commonpath([path_real, root_real]) == root_real
+    except ValueError:
+        return False
+
+
+def build_recursive_filename_index(root_dir: str) -> Dict[str, List[str]]:
+    index: Dict[str, List[str]] = {}
+
+    if not root_dir or not os.path.isdir(root_dir):
+        return index
+
+    for walk_root, _, files in os.walk(root_dir):
+        if not _is_within_dir(walk_root, root_dir):
+            continue
+
+        for filename in files:
+            abs_path = os.path.join(walk_root, filename)
+            if not _is_within_dir(abs_path, root_dir):
+                continue
+            rel_path = os.path.relpath(abs_path, root_dir).replace("\\", "/")
+            index.setdefault(filename, []).append(rel_path)
+
+    return index
+
+
+def find_relative_file_recursive(
+    root_dir: str,
+    target_filename: str,
+    file_index: Optional[Dict[str, List[str]]] = None,
+) -> Optional[str]:
+    index = file_index if file_index is not None else build_recursive_filename_index(root_dir)
+    matches = index.get(target_filename, [])
+    if not matches:
+        return None
+
+    return sorted(matches, key=lambda p: (p.count("/"), len(p), p))[0]
+
+
 # =========================================================
 # Header parsing
 # =========================================================
@@ -496,8 +538,18 @@ def parse_stub_header_symbols(stub_header_path: str) -> dict:
     if m:
         info["reset"] = m.group(1)
 
-    symbols = re.findall(r"\bextern\s+[A-Za-z_][A-Za-z0-9_ *]*\s+(g_[A-Za-z_]\w*)\s*;", text)
-    info["symbols"] = symbols
+    define_resets = re.findall(r"^\s*#\s*define\s+([A-Za-z_]\w*_stub_reset_all)\s*\(", text, flags=re.M)
+    if define_resets and not info["reset"]:
+        info["reset"] = define_resets[0]
+
+    symbols: Set[str] = set()
+    extern_symbols = re.findall(r"\bextern\s+[A-Za-z_][A-Za-z0-9_ *]*\s+([A-Za-z_]\w*)\s*;", text)
+    symbols.update(extern_symbols)
+
+    define_symbols = re.findall(r"^\s*#\s*define\s+([A-Za-z_]\w*)\b", text, flags=re.M)
+    symbols.update(x for x in define_symbols if x.startswith("g_"))
+
+    info["symbols"] = sorted(symbols)
     return info
 
 
@@ -689,6 +741,7 @@ def guess_failure_knob(dep_meta: dict, fn_ret_type: str) -> Dict[str, str]:
 def infer_dependency_metadata(deps: List[str], stub_generated_dir: str) -> List[dict]:
     meta = []
     seen = set()
+    file_index = build_recursive_filename_index(stub_generated_dir)
 
     for dep in deps:
         if dep in seen:
@@ -696,8 +749,14 @@ def infer_dependency_metadata(deps: List[str], stub_generated_dir: str) -> List[
         seen.add(dep)
 
         prefix = module_prefix_from_symbol(dep)
-        stub_header = guess_stub_header(dep)
-        stub_source = guess_stub_source(dep)
+        guessed_stub_header = guess_stub_header(dep)
+        guessed_stub_source = guess_stub_source(dep)
+
+        found_stub_header_rel = find_relative_file_recursive(stub_generated_dir, guessed_stub_header, file_index)
+        found_stub_source_rel = find_relative_file_recursive(stub_generated_dir, guessed_stub_source, file_index)
+
+        stub_header = found_stub_header_rel or guessed_stub_header
+        stub_source = found_stub_source_rel or guessed_stub_source
         stub_header_path = os.path.join(stub_generated_dir, stub_header)
         stub_source_path = os.path.join(stub_generated_dir, stub_source)
 
