@@ -268,6 +268,23 @@ def unique_keep_order(items: List[str]) -> List[str]:
     return out
 
 
+def find_relative_file_recursive(root_dir: str, target_filename: str) -> Optional[str]:
+    if not root_dir or not os.path.isdir(root_dir):
+        return None
+
+    matches: List[str] = []
+    for walk_root, _, files in os.walk(root_dir):
+        if target_filename in files:
+            abs_path = os.path.join(walk_root, target_filename)
+            rel_path = os.path.relpath(abs_path, root_dir).replace("\\", "/")
+            matches.append(rel_path)
+
+    if not matches:
+        return None
+
+    return sorted(matches, key=lambda p: (p.count("/"), len(p), p))[0]
+
+
 # =========================================================
 # Header parsing
 # =========================================================
@@ -696,8 +713,14 @@ def infer_dependency_metadata(deps: List[str], stub_generated_dir: str) -> List[
         seen.add(dep)
 
         prefix = module_prefix_from_symbol(dep)
-        stub_header = guess_stub_header(dep)
-        stub_source = guess_stub_source(dep)
+        guessed_stub_header = guess_stub_header(dep)
+        guessed_stub_source = guess_stub_source(dep)
+
+        found_stub_header_rel = find_relative_file_recursive(stub_generated_dir, guessed_stub_header)
+        found_stub_source_rel = find_relative_file_recursive(stub_generated_dir, guessed_stub_source)
+
+        stub_header = found_stub_header_rel or guessed_stub_header
+        stub_source = found_stub_source_rel or guessed_stub_source
         stub_header_path = os.path.join(stub_generated_dir, stub_header)
         stub_source_path = os.path.join(stub_generated_dir, stub_source)
 
