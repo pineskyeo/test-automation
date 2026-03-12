@@ -1226,10 +1226,13 @@ def emit_makefile(
     target = os.path.join("bin", f"test_{module}_real_auto").replace("\\", "/")
 
     real_srcs = [source_path.replace("\\", "/")]
-    real_srcs.extend([x.replace("\\", "/") for x in dependency_stub_sources])
     real_srcs.extend([x.replace("\\", "/") for x in extra_real_srcs])
     real_srcs = unique_keep_order(real_srcs)
     real_srcs_make = " ".join(real_srcs)
+
+    stub_srcs = [x.replace("\\", "/") for x in dependency_stub_sources]
+    stub_srcs = unique_keep_order(stub_srcs)
+    stub_srcs_make = " ".join(stub_srcs)
 
     return f"""# Auto-generated REAL test Makefile
 # Module: {module}
@@ -1245,6 +1248,7 @@ BIN_DIR = bin
 TARGET = {target}
 
 REAL_SRCS = {real_srcs_make}
+STUB_SRCS = {stub_srcs_make}
 TEST_C = {test_c}
 RUNNER_C = {runner_c}
 
@@ -1256,8 +1260,8 @@ $(BUILD_DIR):
 $(BIN_DIR):
 \tmkdir -p $@
 
-$(TARGET): $(REAL_SRCS) $(TEST_C) $(RUNNER_C) | $(BUILD_DIR) $(BIN_DIR)
-\t$(CC) $(CFLAGS) $(REAL_SRCS) $(TEST_C) $(RUNNER_C) -o $@ $(LDFLAGS)
+$(TARGET): $(REAL_SRCS) $(STUB_SRCS) $(TEST_C) $(RUNNER_C) | $(BUILD_DIR) $(BIN_DIR)
+\t$(CC) $(CFLAGS) $(REAL_SRCS) $(STUB_SRCS) $(TEST_C) $(RUNNER_C) -o $@ $(LDFLAGS)
 
 run: $(TARGET)
 \t./$(TARGET)
@@ -1275,6 +1279,7 @@ re: clean all
 print:
 \t@echo "TARGET     = $(TARGET)"
 \t@echo "REAL_SRCS  = $(REAL_SRCS)"
+\t@echo "STUB_SRCS  = $(STUB_SRCS)"
 \t@echo "TEST_C     = $(TEST_C)"
 \t@echo "RUNNER_C   = $(RUNNER_C)"
 \t@echo "CFLAGS     = $(CFLAGS)"
@@ -1370,6 +1375,7 @@ def main() -> int:
         test_c_path = os.path.join(args.out_dir, f"test_{module}_real_auto.c")
         runner_c_path = os.path.join(args.out_dir, f"runner_{module}_real.c")
         makefile_path = os.path.join(args.out_dir, f"Makefile.{module}.real")
+        dependency_stub_sources = merged_doc.get("stub_sources", [])
 
         write_file(
             test_c_path,
@@ -1390,7 +1396,7 @@ def main() -> int:
                 tests_dir=args.tests_dir,
                 include_dir=args.include_dir,
                 stub_generated_dir=args.stub_generated_dir,
-                dependency_stub_sources=merged_doc.get("stub_sources", []),
+                dependency_stub_sources=dependency_stub_sources,
                 extra_real_srcs=args.extra_real_src,
                 extra_cflags=args.extra_cflags,
                 extra_ldflags=args.extra_ldflags,
