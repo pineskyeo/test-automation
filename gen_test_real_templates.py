@@ -252,14 +252,6 @@ def module_prefix_from_symbol(name: str) -> str:
     return name.split("_", 1)[0] if "_" in name else name
 
 
-def guess_stub_header(dep_name: str) -> str:
-    return f"{module_prefix_from_symbol(dep_name)}_stub.h"
-
-
-def guess_stub_source(dep_name: str) -> str:
-    return f"{module_prefix_from_symbol(dep_name)}_stub.c"
-
-
 def guess_stub_reset_name(dep_name: str) -> str:
     return f"{module_prefix_from_symbol(dep_name)}_stub_reset_all"
 
@@ -513,9 +505,13 @@ def extract_called_functions(body: str, self_name: str) -> List[str]:
             continue
         if name in COMMON_NON_DEP_CALLS:
             continue
-        if name.isupper():
+
+        matched_prefix = next((p for p in COMMON_NON_DEP_PREFIXES if name.startswith(p)), None)
+        if matched_prefix:
+            print("skip by prefix:", name, matched_prefix)
             continue
-        if any(name.startswith(prefix) for prefix in COMMON_NON_DEP_PREFIXES):
+
+        if name.isupper():
             continue
         if re.match(r"^[A-Z][A-Z0-9_]*$", name):
             continue
@@ -790,7 +786,6 @@ def infer_dependency_metadata(deps: List[str], stub_generated_dir: str) -> List[
 
     meta = []
     seen = set()
-    file_index = build_recursive_filename_index(stub_generated_dir)
     stub_module_index = build_stub_module_index(stub_generated_dir)
 
     for dep in deps:
@@ -807,10 +802,9 @@ def infer_dependency_metadata(deps: List[str], stub_generated_dir: str) -> List[
             # Only keep dependencies that resolve to an actual generated stub header.
             continue
 
-        guessed_stub_source = f"{prefix}_stub.c"
-        stub_source = find_relative_file_recursive(stub_generated_dir, guessed_stub_source, file_index)
-        stub_header_path = os.path.join(stub_generated_dir, stub_header)
-        stub_source_path = os.path.join(stub_generated_dir, stub_source) if stub_source else ""
+        stub_source = stub_header.replace("_stub.h", "_stub.c")
+        stub_header_path = os.path.join(stub_generated_dir, stub_header).replace("\\", "/")
+        stub_source_path = os.path.join(stub_generated_dir, stub_source).replace("\\", "/")
 
         knobs = resolve_stub_knobs(dep, stub_header_path)
 
@@ -982,8 +976,8 @@ def merge_scenarios(default_doc: dict, existing_doc: Optional[dict]) -> dict:
         "module": default_doc.get("module"),
         "header": default_doc.get("header"),
         "source": default_doc.get("source"),
-        "stub_headers": existing_doc.get("stub_headers", default_doc.get("stub_headers", [])),
-        "stub_sources": existing_doc.get("stub_sources", default_doc.get("stub_sources", [])),
+        "stub_headers": default_doc.get("stub_headers", []),
+        "stub_sources": default_doc.get("stub_sources", []),
         "functions": merged_functions
     }
 
