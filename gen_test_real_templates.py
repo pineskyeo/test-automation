@@ -1215,7 +1215,6 @@ def emit_makefile(
     tests_dir: str,
     include_dir: str,
     stub_generated_dir: str,
-    dependency_stub_sources: List[str],
     extra_real_srcs: List[str],
     extra_cflags: str,
     extra_ldflags: str,
