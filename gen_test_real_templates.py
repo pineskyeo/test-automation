@@ -33,6 +33,8 @@ import sys
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Tuple, Set
 
+from c_proto_parser import parse_header_prototypes
+
 
 # =========================================================
 # Models
@@ -490,52 +492,16 @@ def dedup_protos(protos: List[FunctionProto]) -> List[FunctionProto]:
 
 
 def parse_prototypes(header_text: str, header_path: str) -> List[FunctionProto]:
-    text = strip_comments(header_text)
-    text = remove_preprocessor_lines(text)
-    text = remove_static_inline_function_defs(text)
-    text = text.replace('extern "C" {', "")
-    text = text.replace('extern \"C\" {', "")
-
-    chunks = split_top_level_decl_chunks(text)
-
-    out = []
-
-    for chunk in chunks:
-        chunk = collapse_ws(chunk)
-
-        if "(" not in chunk or ")" not in chunk or not chunk.endswith(";"):
-            continue
-        if chunk.startswith("typedef "):
-            continue
-        if re.search(r"\btypedef\b", chunk):
-            continue
-
-        m = re.match(
-            r"^(?P<ret>.+?)\s+(?P<name>[A-Za-z_]\w*)\s*\((?P<params>.*)\)\s*;$",
-            chunk
+    parsed = parse_header_prototypes(header_text)
+    out = [
+        FunctionProto(
+            ret_type=p.ret_type,
+            name=p.name,
+            params=[Param(raw=pp.raw, type_str=pp.type_str, name=pp.name) for pp in p.params],
+            header_path=header_path,
         )
-        if not m:
-            continue
-
-        ret_type = collapse_ws(m.group("ret"))
-        fn_name = m.group("name").strip()
-        params_raw = m.group("params").strip()
-
-        params = []
-        if params_raw and params_raw != "void":
-            raw_parts = split_top_level_params(params_raw)
-            parsed = [parse_param(p) for p in raw_parts]
-            if any(x and x.type_str in ("...", "FUNC_PTR") for x in parsed):
-                continue
-            params = [x for x in parsed if x is not None]
-
-        out.append(FunctionProto(
-            ret_type=ret_type,
-            name=fn_name,
-            params=params,
-            header_path=header_path
-        ))
-
+        for p in parsed
+    ]
     return dedup_protos(out)
 
 

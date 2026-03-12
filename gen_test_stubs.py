@@ -24,6 +24,8 @@ import sys
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+from c_proto_parser import parse_header_prototypes
+
 
 # =========================================================
 # Data models
@@ -62,14 +64,8 @@ def eprint(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
 
 
-def strip_comments(text: str) -> str:
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-    text = re.sub(r"//.*?$", "", text, flags=re.M)
-    return text
-
-
 def collapse_ws(s: str) -> str:
-    return re.sub(r"\s+", " ", s).strip()
+    return " ".join(s.split())
 
 
 def sanitize_basename(path: str) -> str:
@@ -107,146 +103,17 @@ def list_header_files(path: str) -> List[str]:
     return out
 
 
-# =========================================================
-# Prototype parsing
-# =========================================================
-
-def remove_preprocessor_lines(text: str) -> str:
-    lines = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            continue
-        lines.append(line)
-    return "\n".join(lines)
-
-
-def split_top_level_params(param_text: str) -> List[str]:
-    parts = []
-    buf = []
-    depth = 0
-
-    for ch in param_text:
-        if ch == "(":
-            depth += 1
-            buf.append(ch)
-        elif ch == ")":
-            depth -= 1
-            buf.append(ch)
-        elif ch == "," and depth == 0:
-            part = "".join(buf).strip()
-            if part:
-                parts.append(part)
-            buf = []
-        else:
-            buf.append(ch)
-
-    tail = "".join(buf).strip()
-    if tail:
-        parts.append(tail)
-
-    return parts
-
-
-def parse_param(param_raw: str) -> Optional[Param]:
-    s = collapse_ws(param_raw)
-    if not s or s == "void":
-        return None
-
-    if "..." in s:
-        return Param(raw=s, type_str="...", name="...")
-
-    # Skip function-pointer parameters
-    if re.search(r"\(\s*\*\s*[A-Za-z_]\w*\s*\)", s):
-        return Param(raw=s, type_str="FUNC_PTR", name="FUNC_PTR")
-
-    # Common normal case:
-    #   "const char *name"
-    #   "foo_t** out"
-    #   "size_t n"
-    m = re.match(r"^(?P<type>.+?)(?P<name>[A-Za-z_]\w*)$", s)
-    if not m:
-        return Param(raw=s, type_str=s, name="")
-
-    type_part = m.group("type").rstrip()
-    name = m.group("name").strip()
-
-    return Param(raw=s, type_str=collapse_ws(type_part), name=name)
-
-
 def parse_prototypes(text: str, header_path: str) -> List[FunctionProto]:
-    text = strip_comments(text)
-    text = remove_preprocessor_lines(text)
-
-    # Normalize extern "C" blocks if present
-    text = text.replace('extern "C" {', "")
-    text = text.replace("extern \"C\" {", "")
-    text = text.replace("}", "}\n")
-
-    # Collect statement-like chunks ending with ';'
-    chunks = []
-    buf = []
-
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        buf.append(stripped)
-        if ";" in stripped:
-            chunks.append(" ".join(buf))
-            buf = []
-
-    protos: List[FunctionProto] = []
-
-    for chunk in chunks:
-        chunk = collapse_ws(chunk)
-
-        if "(" not in chunk or ")" not in chunk or not chunk.endswith(";"):
-            continue
-
-        # Skip typedefs and variables
-        if chunk.startswith("typedef "):
-            continue
-        if re.search(r"\btypedef\b", chunk):
-            continue
-        if re.search(r"\bextern\b.+\b[A-Za-z_]\w*\s*;", chunk) and "(" not in chunk:
-            continue
-
-        # Skip macros disguised as declarations
-        if any(name in chunk for name in SKIP_NAMES):
-            continue
-
-        # Match: return_type name(args);
-        m = re.match(
-            r"^(?P<ret>.+?)\s+(?P<name>[A-Za-z_]\w*)\s*\((?P<params>.*)\)\s*;$",
-            chunk
+    parsed = parse_header_prototypes(text)
+    return [
+        FunctionProto(
+            ret_type=p.ret_type,
+            name=p.name,
+            params=[Param(raw=pp.raw, type_str=pp.type_str, name=pp.name) for pp in p.params],
+            header_path=header_path,
         )
-        if not m:
-            continue
-
-        ret_type = collapse_ws(m.group("ret"))
-        name = m.group("name").strip()
-        params_raw = m.group("params").strip()
-
-        if name in SKIP_NAMES:
-            continue
-
-        params: List[Param] = []
-        if params_raw and params_raw != "void":
-            raw_parts = split_top_level_params(params_raw)
-            parsed_params = [parse_param(p) for p in raw_parts]
-            if any(p and (p.type_str in ("...", "FUNC_PTR")) for p in parsed_params):
-                continue
-            params = [p for p in parsed_params if p is not None]
-
-        protos.append(FunctionProto(
-            ret_type=ret_type,
-            name=name,
-            params=params,
-            header_path=header_path
-        ))
-
-    return protos
+        for p in parsed
+    ]
 
 
 # =========================================================
