@@ -932,6 +932,15 @@ def normalize_output_path(path: str) -> str:
     return os.path.normpath(path).replace("\\", "/")
 
 
+def module_name_from_c_path(path: str) -> str:
+    base = os.path.basename(path).replace("\\", "/")
+    if base.endswith(".c"):
+        base = base[:-2]
+    if base.endswith("_stub"):
+        base = base[:-len("_stub")]
+    return base
+
+
 def parse_include_directives(file_text: str) -> List[Tuple[str, str]]:
     includes = []
     pattern = re.compile(r'^\s*#\s*include\s*([<"])([^">]+)[">]', re.M)
@@ -996,7 +1005,7 @@ def collect_stub_candidates_for_header(include_path: str, resolved_header_path: 
 
 
 def extract_project_include_stub_candidates(
-    start_file_path: str,
+    start_file_paths: List[str],
     include_search_roots: List[str],
     stub_index: dict,
 ) -> List[str]:
@@ -1033,7 +1042,9 @@ def extract_project_include_stub_candidates(
             )
             visit(resolved)
 
-    visit(start_file_path)
+    for start_file_path in start_file_paths:
+        visit(start_file_path)
+
     return unique_keep_order(candidates)
 
 
@@ -1148,6 +1159,7 @@ def build_default_scenario_doc(
     protos: List[FunctionProto],
     source_text: str,
     stub_generated_dir: str,
+    extra_real_srcs: List[str],
     extra_stub_srcs: List[str],
     include_search_roots: List[str],
 ) -> dict:
@@ -1155,6 +1167,12 @@ def build_default_scenario_doc(
     functions = []
     all_stub_headers = []
     all_stub_sources = []
+
+    real_srcs = unique_keep_order([source_path] + list(extra_real_srcs or []))
+    real_module_names = {
+        module_name_from_c_path(normalize_output_path(path))
+        for path in real_srcs
+    }
 
     stub_index = build_generated_stub_index(stub_generated_dir)
     called_stub_sources = []
@@ -1178,7 +1196,7 @@ def build_default_scenario_doc(
             "scenarios": make_real_scenarios(fn, dep_meta)
         })
 
-    include_stub_sources = extract_project_include_stub_candidates(source_path, include_search_roots, stub_index)
+    include_stub_sources = extract_project_include_stub_candidates(real_srcs, include_search_roots, stub_index)
 
     explicit_stub_sources = []
     for path in extra_stub_srcs:
@@ -1204,13 +1222,17 @@ def build_default_scenario_doc(
 
     normalized_dep_stub_sources = [normalize_output_path(p) for p in all_stub_sources]
     normalized_resolved_stub_sources = [normalize_output_path(p) for p in resolved_stub_sources]
+    filtered_stub_sources = [
+        p for p in (normalized_dep_stub_sources + normalized_resolved_stub_sources)
+        if module_name_from_c_path(p) not in real_module_names
+    ]
 
     return {
         "module": module,
         "header": normalize_output_path(header_path),
         "source": normalize_output_path(source_path),
         "stub_headers": unique_keep_order(all_stub_headers),
-        "stub_sources": unique_keep_order(normalized_dep_stub_sources + normalized_resolved_stub_sources),
+        "stub_sources": unique_keep_order(filtered_stub_sources),
         "functions": functions
     }
 
@@ -1663,6 +1685,7 @@ def main() -> int:
             protos=protos,
             source_text=source_text,
             stub_generated_dir=args.stub_generated_dir,
+            extra_real_srcs=args.extra_real_src,
             extra_stub_srcs=args.extra_stub_src,
             include_search_roots=include_search_roots,
         )
