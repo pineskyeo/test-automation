@@ -65,7 +65,13 @@ C_KEYWORDS = {
 COMMON_NON_DEP_CALLS = {
     "assert", "memset", "memcpy", "memcmp", "strlen", "strcmp", "strncmp",
     "malloc", "calloc", "realloc", "free", "printf", "snprintf", "sprintf",
-    "fprintf", "puts", "putchar", "abort", "exit"
+    "fprintf", "puts", "putchar", "abort", "exit",
+    "strchr", "strrchr", "strstr", "strtol", "strtoul", "atoi", "atol",
+    "isdigit", "isalpha", "isalnum", "isspace", "tolower", "toupper"
+}
+
+COMMON_NON_DEP_PREFIXES = {
+    "DBG", "ERR", "WRN", "INF", "TRACE", "LOG", "ENSURE", "ASSERT"
 }
 
 
@@ -507,6 +513,12 @@ def extract_called_functions(body: str, self_name: str) -> List[str]:
             continue
         if name in COMMON_NON_DEP_CALLS:
             continue
+        if name.isupper():
+            continue
+        if any(name.startswith(prefix) for prefix in COMMON_NON_DEP_PREFIXES):
+            continue
+        if re.match(r"^[A-Z][A-Z0-9_]*$", name):
+            continue
         if name == self_name:
             continue
         if name in seen:
@@ -739,24 +751,63 @@ def guess_failure_knob(dep_meta: dict, fn_ret_type: str) -> Dict[str, str]:
 
 
 def infer_dependency_metadata(deps: List[str], stub_generated_dir: str) -> List[dict]:
+    def build_stub_module_index(root_dir: str) -> Dict[str, List[str]]:
+        module_index: Dict[str, List[str]] = {}
+        if not root_dir or not os.path.isdir(root_dir):
+            return module_index
+
+        for walk_root, _, files in os.walk(root_dir):
+            for filename in files:
+                if not filename.endswith("_stub.h"):
+                    continue
+                rel_path = os.path.relpath(os.path.join(walk_root, filename), root_dir).replace("\\", "/")
+                module_name = filename[:-len("_stub.h")]
+                module_index.setdefault(module_name, []).append(rel_path)
+
+        for module_name in list(module_index.keys()):
+            module_index[module_name] = sorted(
+                module_index[module_name],
+                key=lambda p: (p.count("/"), len(p), p)
+            )
+        return module_index
+
+    def resolve_stub_header_from_dep(dep_name: str, module_index: Dict[str, List[str]]) -> Optional[Tuple[str, str]]:
+        tokens = dep_name.split("_")
+        if not tokens:
+            return None
+
+        best_module = None
+        for i in range(len(tokens), 0, -1):
+            candidate = "_".join(tokens[:i])
+            if candidate in module_index:
+                best_module = candidate
+                break
+
+        if not best_module:
+            return None
+
+        return best_module, module_index[best_module][0]
+
     meta = []
     seen = set()
     file_index = build_recursive_filename_index(stub_generated_dir)
+    stub_module_index = build_stub_module_index(stub_generated_dir)
 
     for dep in deps:
         if dep in seen:
             continue
         seen.add(dep)
 
-        prefix = module_prefix_from_symbol(dep)
-        guessed_stub_header = guess_stub_header(dep)
-        guessed_stub_source = guess_stub_source(dep)
+        resolved = resolve_stub_header_from_dep(dep, stub_module_index)
+        if not resolved:
+            continue
 
-        stub_header = find_relative_file_recursive(stub_generated_dir, guessed_stub_header, file_index)
+        prefix, stub_header = resolved
         if not stub_header:
             # Only keep dependencies that resolve to an actual generated stub header.
             continue
 
+        guessed_stub_source = f"{prefix}_stub.c"
         stub_source = find_relative_file_recursive(stub_generated_dir, guessed_stub_source, file_index)
         stub_header_path = os.path.join(stub_generated_dir, stub_header)
         stub_source_path = os.path.join(stub_generated_dir, stub_source) if stub_source else ""
