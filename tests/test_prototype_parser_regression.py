@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
-from gen_test_real_templates import parse_prototypes as parse_real
-from gen_test_stubs import parse_prototypes as parse_stubs
+from generators.gen_test_real_templates import parse_prototypes as parse_real
+from generators.gen_test_stubs import parse_prototypes as parse_stubs
 
 HEADER = r'''
 #ifndef LOGGER_H

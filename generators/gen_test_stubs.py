@@ -24,7 +24,7 @@ import sys
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-from c_proto_parser import parse_header_prototypes
+from generators.c_proto_parser import parse_header_prototypes
 
 
 # =========================================================

@@ -34,7 +34,7 @@ import sys
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Tuple, Set
 
-from c_proto_parser import parse_header_prototypes
+from generators.c_proto_parser import parse_header_prototypes
 
 
 # =========================================================
