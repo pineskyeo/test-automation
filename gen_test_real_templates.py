@@ -927,22 +927,112 @@ def resolve_stub_c_from_called_functions(called_functions: List[str], stub_index
     return unique_keep_order(resolved)
 
 
-def extract_project_include_stub_candidates(source_text: str, stub_index: dict) -> List[str]:
+def normalize_output_path(path: str) -> str:
+    return os.path.normpath(path).replace("\\", "/")
+
+
+def parse_include_directives(file_text: str) -> List[Tuple[str, str]]:
+    includes = []
+    pattern = re.compile(r'^\s*#\s*include\s*([<"])([^">]+)[">]', re.M)
+    for m in pattern.finditer(file_text):
+        includes.append((m.group(1), m.group(2).strip().replace("\\", "/")))
+    return includes
+
+
+def resolve_include_path(
+    current_file_path: str,
+    include_delim: str,
+    include_path: str,
+    include_search_roots: List[str],
+) -> Optional[str]:
+    search_candidates = []
+
+    if include_delim == '"':
+        search_candidates.append(os.path.join(os.path.dirname(current_file_path), include_path))
+
+    for root in include_search_roots:
+        search_candidates.append(os.path.join(root, include_path))
+
+    for candidate in search_candidates:
+        candidate_abs = os.path.abspath(candidate)
+        if os.path.isfile(candidate_abs):
+            return candidate_abs
+
+    return None
+
+
+def collect_stub_candidates_for_header(include_path: str, resolved_header_path: str, include_search_roots: List[str], stub_index: dict) -> List[str]:
     candidates = []
     stub_c_set = stub_index.get("stub_c_set", set())
+    stub_c_by_module_name = stub_index.get("stub_c_by_module_name", {})
 
-    for include_path in re.findall(r'^\s*#\s*include\s*[<"]([^">]+)[">]', source_text, flags=re.M):
-        include_norm = include_path.strip().replace("\\", "/")
-        if not include_norm.startswith("cortex/"):
-            continue
-        if not include_norm.endswith(".h"):
-            continue
+    include_norm = include_path.strip().replace("\\", "/")
 
+    if include_norm.startswith("cortex/") and include_norm.endswith(".h"):
         rel_module_path = include_norm[len("cortex/"):]
-        stub_candidate = rel_module_path[:-2] + "_stub.c"
-        if stub_candidate in stub_c_set:
-            candidates.append(stub_candidate)
+        candidate = rel_module_path[:-2] + "_stub.c"
+        if candidate in stub_c_set:
+            candidates.append(candidate)
 
+    if include_norm.endswith(".h"):
+        module_name = os.path.splitext(os.path.basename(include_norm))[0]
+        if module_name in stub_c_by_module_name:
+            candidates.append(stub_c_by_module_name[module_name][0])
+
+    for root in include_search_roots:
+        try:
+            rel = os.path.relpath(resolved_header_path, root).replace("\\", "/")
+        except ValueError:
+            continue
+        if rel.startswith("../") or rel == "..":
+            continue
+        if rel.startswith("cortex/") and rel.endswith(".h"):
+            candidate = rel[len("cortex/"):-2] + "_stub.c"
+            if candidate in stub_c_set:
+                candidates.append(candidate)
+
+    return unique_keep_order(candidates)
+
+
+def extract_project_include_stub_candidates(
+    start_file_path: str,
+    include_search_roots: List[str],
+    stub_index: dict,
+) -> List[str]:
+    visited_files: Set[str] = set()
+    candidates: List[str] = []
+
+    normalized_roots = []
+    for root in include_search_roots:
+        if not root:
+            continue
+        root_abs = os.path.abspath(root)
+        if os.path.isdir(root_abs):
+            normalized_roots.append(root_abs)
+
+    normalized_roots = unique_keep_order(normalized_roots)
+
+    def visit(file_path: str) -> None:
+        abs_path = os.path.abspath(file_path)
+        if abs_path in visited_files:
+            return
+        visited_files.add(abs_path)
+
+        if not os.path.isfile(abs_path):
+            return
+
+        file_text = read_file(abs_path)
+        for include_delim, include_path in parse_include_directives(file_text):
+            resolved = resolve_include_path(abs_path, include_delim, include_path, normalized_roots)
+            if not resolved:
+                continue
+
+            candidates.extend(
+                collect_stub_candidates_for_header(include_path, resolved, normalized_roots, stub_index)
+            )
+            visit(resolved)
+
+    visit(start_file_path)
     return unique_keep_order(candidates)
 
 
@@ -1013,6 +1103,7 @@ def build_default_scenario_doc(
     source_text: str,
     stub_generated_dir: str,
     extra_stub_srcs: List[str],
+    include_search_roots: List[str],
 ) -> dict:
     module = sanitize_basename(header_path)
     functions = []
@@ -1041,36 +1132,39 @@ def build_default_scenario_doc(
             "scenarios": make_real_scenarios(fn, dep_meta)
         })
 
-    include_stub_sources = extract_project_include_stub_candidates(source_text, stub_index)
+    include_stub_sources = extract_project_include_stub_candidates(source_path, include_search_roots, stub_index)
 
     explicit_stub_sources = []
     for path in extra_stub_srcs:
-        abs_path = path.replace("\\", "/")
+        abs_path = normalize_output_path(path)
         try:
             rel_path = os.path.relpath(abs_path, stub_generated_dir).replace("\\", "/")
         except ValueError:
             rel_path = abs_path
 
         if rel_path in stub_index.get("stub_c_set", set()):
-            explicit_stub_sources.append(os.path.join(stub_generated_dir, rel_path).replace("\\", "/"))
+            explicit_stub_sources.append(os.path.join(stub_generated_dir, rel_path))
         elif os.path.exists(abs_path):
             explicit_stub_sources.append(abs_path)
 
     resolved_stub_sources = []
     resolved_stub_sources.extend(
-        os.path.join(stub_generated_dir, rel).replace("\\", "/") for rel in called_stub_sources
+        os.path.join(stub_generated_dir, rel) for rel in called_stub_sources
     )
     resolved_stub_sources.extend(
-        os.path.join(stub_generated_dir, rel).replace("\\", "/") for rel in include_stub_sources
+        os.path.join(stub_generated_dir, rel) for rel in include_stub_sources
     )
     resolved_stub_sources.extend(explicit_stub_sources)
 
+    normalized_dep_stub_sources = [normalize_output_path(p) for p in all_stub_sources]
+    normalized_resolved_stub_sources = [normalize_output_path(p) for p in resolved_stub_sources]
+
     return {
         "module": module,
-        "header": header_path.replace("\\", "/"),
-        "source": source_path.replace("\\", "/"),
+        "header": normalize_output_path(header_path),
+        "source": normalize_output_path(source_path),
         "stub_headers": unique_keep_order(all_stub_headers),
-        "stub_sources": unique_keep_order(all_stub_sources + resolved_stub_sources),
+        "stub_sources": unique_keep_order(normalized_dep_stub_sources + normalized_resolved_stub_sources),
         "functions": functions
     }
 
@@ -1510,6 +1604,12 @@ def main() -> int:
                 eprint(f"[skip] {header_path}: no supported prototypes")
             continue
 
+        include_search_roots = [
+            os.path.dirname(source_path),
+            os.path.dirname(header_path),
+            args.include_root,
+        ]
+
         default_doc = build_default_scenario_doc(
             header_path=header_path,
             source_path=source_path,
@@ -1517,6 +1617,7 @@ def main() -> int:
             source_text=source_text,
             stub_generated_dir=args.stub_generated_dir,
             extra_stub_srcs=args.extra_stub_src,
+            include_search_roots=include_search_roots,
         )
 
         module = default_doc["module"]
