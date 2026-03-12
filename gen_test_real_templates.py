@@ -752,13 +752,14 @@ def infer_dependency_metadata(deps: List[str], stub_generated_dir: str) -> List[
         guessed_stub_header = guess_stub_header(dep)
         guessed_stub_source = guess_stub_source(dep)
 
-        found_stub_header_rel = find_relative_file_recursive(stub_generated_dir, guessed_stub_header, file_index)
-        found_stub_source_rel = find_relative_file_recursive(stub_generated_dir, guessed_stub_source, file_index)
+        stub_header = find_relative_file_recursive(stub_generated_dir, guessed_stub_header, file_index)
+        if not stub_header:
+            # Only keep dependencies that resolve to an actual generated stub header.
+            continue
 
-        stub_header = found_stub_header_rel or guessed_stub_header
-        stub_source = found_stub_source_rel or guessed_stub_source
+        stub_source = find_relative_file_recursive(stub_generated_dir, guessed_stub_source, file_index)
         stub_header_path = os.path.join(stub_generated_dir, stub_header)
-        stub_source_path = os.path.join(stub_generated_dir, stub_source)
+        stub_source_path = os.path.join(stub_generated_dir, stub_source) if stub_source else ""
 
         knobs = resolve_stub_knobs(dep, stub_header_path)
 
@@ -1095,7 +1096,7 @@ def collect_stub_headers(scenario_doc: dict) -> List[str]:
 def emit_test_c(
     scenario_doc: dict,
     include_root: Optional[str],
-    stub_include_prefix: str,
+    stub_generated_dir: str,
     test_tools_header: str,
 ) -> str:
     module = scenario_doc["module"]
@@ -1111,11 +1112,9 @@ def emit_test_c(
     lines.append(f'#include "{test_tools_header}"')
     lines.append(f'#include "{header_inc}"')
 
+    include_prefix = stub_generated_dir.rstrip("/")
     for hdr in stub_headers:
-        if stub_include_prefix:
-            lines.append(f'#include "{stub_include_prefix.rstrip("/")}/{hdr}"')
-        else:
-            lines.append(f'#include "{hdr}"')
+        lines.append(f'#include "{include_prefix}/{hdr}"')
 
     lines.append("")
     lines.append("/*")
@@ -1269,7 +1268,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--include-dir", default="include", help="Compiler include directory for Makefile")
     ap.add_argument("--tests-dir", default="tests", help="Tests base directory for Makefile")
     ap.add_argument("--stub-generated-dir", default="tests/stub/generated", help="Generated stub directory")
-    ap.add_argument("--stub-include-prefix", default="", help='Prefix used in generated test C for stub headers')
+    ap.add_argument("--stub-include-prefix", default="", help='(deprecated) Unused; stub includes are resolved from --stub-generated-dir')
     ap.add_argument(
         "--test-tools-header",
         default="test_tools.h",
@@ -1332,7 +1331,7 @@ def main() -> int:
             emit_test_c(
                 merged_doc,
                 args.include_root,
-                args.stub_include_prefix,
+                args.stub_generated_dir,
                 args.test_tools_header,
             ),
         )
