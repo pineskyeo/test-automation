@@ -1036,6 +1036,27 @@ def extract_project_include_stub_candidates(
     return unique_keep_order(candidates)
 
 
+def build_include_search_roots(
+    source_path: str,
+    header_path: str,
+    include_root: Optional[str],
+    include_dir: Optional[str],
+) -> List[str]:
+    roots = [
+        os.path.dirname(source_path),
+        os.path.dirname(header_path),
+        include_root,
+    ]
+
+    if include_dir:
+        for include_entry in include_dir.split(os.pathsep):
+            include_entry = include_entry.strip()
+            if include_entry:
+                roots.append(include_entry)
+
+    return unique_keep_order([r for r in roots if r])
+
+
 def make_real_scenarios(fn: FunctionProto, dep_meta: List[dict]) -> List[dict]:
     scenarios = []
     locals_list = make_locals(fn)
@@ -1604,11 +1625,12 @@ def main() -> int:
                 eprint(f"[skip] {header_path}: no supported prototypes")
             continue
 
-        include_search_roots = [
-            os.path.dirname(source_path),
-            os.path.dirname(header_path),
-            args.include_root,
-        ]
+        include_search_roots = build_include_search_roots(
+            source_path=source_path,
+            header_path=header_path,
+            include_root=args.include_root,
+            include_dir=args.include_dir,
+        )
 
         default_doc = build_default_scenario_doc(
             header_path=header_path,
