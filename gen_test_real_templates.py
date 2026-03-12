@@ -29,6 +29,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import sys
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Tuple, Set
@@ -1036,6 +1037,51 @@ def extract_project_include_stub_candidates(
     return unique_keep_order(candidates)
 
 
+def parse_include_dir_entries(include_dir: Optional[str]) -> List[str]:
+    if not include_dir:
+        return []
+
+    entries: List[str] = []
+    tokens = shlex.split(include_dir)
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "-I":
+            i += 1
+            if i < len(tokens):
+                entries.append(tokens[i])
+        elif token.startswith("-I") and len(token) > 2:
+            entries.append(token[2:])
+        else:
+            entries.append(token)
+        i += 1
+
+    expanded_entries: List[str] = []
+    for entry in entries:
+        for item in entry.split(os.pathsep):
+            item = item.strip()
+            if item:
+                expanded_entries.append(item)
+
+    return unique_keep_order(expanded_entries)
+
+
+def build_include_search_roots(
+    source_path: str,
+    header_path: str,
+    include_root: Optional[str],
+    include_dir: Optional[str],
+) -> List[str]:
+    roots = [
+        os.path.dirname(source_path),
+        os.path.dirname(header_path),
+        include_root,
+        *parse_include_dir_entries(include_dir),
+    ]
+
+    return unique_keep_order([r for r in roots if r])
+
+
 def make_real_scenarios(fn: FunctionProto, dep_meta: List[dict]) -> List[dict]:
     scenarios = []
     locals_list = make_locals(fn)
@@ -1604,11 +1650,12 @@ def main() -> int:
                 eprint(f"[skip] {header_path}: no supported prototypes")
             continue
 
-        include_search_roots = [
-            os.path.dirname(source_path),
-            os.path.dirname(header_path),
-            args.include_root,
-        ]
+        include_search_roots = build_include_search_roots(
+            source_path=source_path,
+            header_path=header_path,
+            include_root=args.include_root,
+            include_dir=args.include_dir,
+        )
 
         default_doc = build_default_scenario_doc(
             header_path=header_path,
