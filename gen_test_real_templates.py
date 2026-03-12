@@ -1374,6 +1374,7 @@ def main() -> int:
         test_c_path = os.path.join(args.out_dir, f"test_{module}_real_auto.c")
         runner_c_path = os.path.join(args.out_dir, f"runner_{module}_real.c")
         makefile_path = os.path.join(args.out_dir, f"Makefile.{module}.real")
+        dependency_stub_sources = merged_doc.get("stub_sources", [])
 
         write_file(
             test_c_path,
@@ -1394,6 +1395,7 @@ def main() -> int:
                 tests_dir=args.tests_dir,
                 include_dir=args.include_dir,
                 stub_generated_dir=args.stub_generated_dir,
+                dependency_stub_sources=dependency_stub_sources,
                 extra_real_srcs=args.extra_real_src,
                 extra_cflags=args.extra_cflags,
                 extra_ldflags=args.extra_ldflags,
