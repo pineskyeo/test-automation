@@ -114,9 +114,20 @@ def strip_comments(text: str) -> str:
 
 def remove_preprocessor_lines(text: str) -> str:
     lines = []
+    in_directive = False
     for line in text.splitlines():
-        if line.strip().startswith("#"):
+        stripped = line.lstrip()
+
+        if in_directive:
+            if stripped.endswith("\\"):
+                continue
+            in_directive = False
             continue
+
+        if stripped.startswith("#"):
+            in_directive = stripped.endswith("\\")
+            continue
+
         lines.append(line)
     return "\n".join(lines)
 
@@ -231,6 +242,10 @@ def is_uptr_type(type_str: str) -> bool:
     return normalize_type(type_str) == "uintptr_t"
 
 
+def is_int_type(type_str: str) -> bool:
+    return normalize_type(type_str) == "int"
+
+
 def is_ptr_to_ptr(p: Param) -> bool:
     return pointer_depth(p.type_str) >= 2
 
@@ -339,6 +354,99 @@ def split_top_level_params(param_text: str) -> List[str]:
     return parts
 
 
+def _find_matching(text: str, start: int, open_ch: str, close_ch: str) -> int:
+    depth = 0
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def remove_static_inline_function_defs(text: str) -> str:
+    out = []
+    pos = 0
+    for m in re.finditer(r"\bstatic\s+inline\b", text):
+        start = m.start()
+        out.append(text[pos:start])
+
+        lpar = text.find("(", m.end())
+        if lpar < 0:
+            out.append(text[start:])
+            pos = len(text)
+            break
+
+        rpar = _find_matching(text, lpar, "(", ")")
+        if rpar < 0:
+            out.append(text[start:])
+            pos = len(text)
+            break
+
+        i = rpar + 1
+        while i < len(text) and text[i].isspace():
+            i += 1
+
+        if i < len(text) and text[i] == "{":
+            rbrace = _find_matching(text, i, "{", "}")
+            if rbrace < 0:
+                pos = len(text)
+                break
+            pos = rbrace + 1
+            while pos < len(text) and text[pos] in " \t\r\n;":
+                pos += 1
+            continue
+
+        out.append(text[start:i])
+        pos = i
+
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def split_top_level_decl_chunks(text: str) -> List[str]:
+    chunks: List[str] = []
+    buf: List[str] = []
+    paren_depth = 0
+    brace_depth = 0
+
+    for ch in text:
+        if ch == "{":
+            brace_depth += 1
+            if brace_depth == 1:
+                buf = []
+            continue
+        if ch == "}":
+            if brace_depth > 0:
+                brace_depth -= 1
+            if brace_depth == 0:
+                buf = []
+            continue
+
+        if brace_depth > 0:
+            continue
+
+        if ch == "(":
+            paren_depth += 1
+        elif ch == ")" and paren_depth > 0:
+            paren_depth -= 1
+
+        buf.append(ch)
+
+        if ch == ";" and paren_depth == 0:
+            chunk = collapse_ws("".join(buf))
+            if chunk:
+                chunks.append(chunk)
+            buf = []
+
+    return chunks
+
+
 def parse_param(param_raw: str) -> Optional[Param]:
     s = collapse_ws(param_raw)
     if not s or s == "void":
@@ -384,20 +492,11 @@ def dedup_protos(protos: List[FunctionProto]) -> List[FunctionProto]:
 def parse_prototypes(header_text: str, header_path: str) -> List[FunctionProto]:
     text = strip_comments(header_text)
     text = remove_preprocessor_lines(text)
+    text = remove_static_inline_function_defs(text)
     text = text.replace('extern "C" {', "")
     text = text.replace('extern \"C\" {', "")
 
-    chunks = []
-    buf = []
-
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        buf.append(stripped)
-        if ";" in stripped:
-            chunks.append(" ".join(buf))
-            buf = []
+    chunks = split_top_level_decl_chunks(text)
 
     out = []
 
@@ -725,6 +824,9 @@ def default_expect_for_ret_type(ret_type: str, success: bool, fn_name: str = "")
 
     if is_uptr_type(ret_type):
         return {"int_ne": ["ret", "(uintptr_t)0"]} if success else {"int_eq": ["ret", "(uintptr_t)0"]}
+
+    if is_int_type(ret_type):
+        return {"int_ne": ["ret", "0"]} if success else {"int_eq": ["ret", "0"]}
 
     return {}
 
