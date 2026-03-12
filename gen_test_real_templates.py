@@ -1229,6 +1229,10 @@ def emit_makefile(
     real_srcs = unique_keep_order(real_srcs)
     real_srcs_make = " ".join(real_srcs)
 
+    stub_srcs = [x.replace("\\", "/") for x in dependency_stub_sources]
+    stub_srcs = unique_keep_order(stub_srcs)
+    stub_srcs_make = " ".join(stub_srcs)
+
     return f"""# Auto-generated REAL test Makefile
 # Module: {module}
 
@@ -1243,6 +1247,7 @@ BIN_DIR = bin
 TARGET = {target}
 
 REAL_SRCS = {real_srcs_make}
+STUB_SRCS = {stub_srcs_make}
 TEST_C = {test_c}
 RUNNER_C = {runner_c}
 
@@ -1254,8 +1259,8 @@ $(BUILD_DIR):
 $(BIN_DIR):
 \tmkdir -p $@
 
-$(TARGET): $(REAL_SRCS) $(TEST_C) $(RUNNER_C) | $(BUILD_DIR) $(BIN_DIR)
-\t$(CC) $(CFLAGS) $(REAL_SRCS) $(TEST_C) $(RUNNER_C) -o $@ $(LDFLAGS)
+$(TARGET): $(REAL_SRCS) $(STUB_SRCS) $(TEST_C) $(RUNNER_C) | $(BUILD_DIR) $(BIN_DIR)
+\t$(CC) $(CFLAGS) $(REAL_SRCS) $(STUB_SRCS) $(TEST_C) $(RUNNER_C) -o $@ $(LDFLAGS)
 
 run: $(TARGET)
 \t./$(TARGET)
@@ -1273,6 +1278,7 @@ re: clean all
 print:
 \t@echo "TARGET     = $(TARGET)"
 \t@echo "REAL_SRCS  = $(REAL_SRCS)"
+\t@echo "STUB_SRCS  = $(STUB_SRCS)"
 \t@echo "TEST_C     = $(TEST_C)"
 \t@echo "RUNNER_C   = $(RUNNER_C)"
 \t@echo "CFLAGS     = $(CFLAGS)"
