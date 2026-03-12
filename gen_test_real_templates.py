@@ -1215,7 +1215,6 @@ def emit_makefile(
     tests_dir: str,
     include_dir: str,
     stub_generated_dir: str,
-    dependency_stub_sources: List[str],
     extra_real_srcs: List[str],
     extra_cflags: str,
     extra_ldflags: str,
@@ -1226,7 +1225,6 @@ def emit_makefile(
     target = os.path.join("bin", f"test_{module}_real_auto").replace("\\", "/")
 
     real_srcs = [source_path.replace("\\", "/")]
-    real_srcs.extend([x.replace("\\", "/") for x in dependency_stub_sources])
     real_srcs.extend([x.replace("\\", "/") for x in extra_real_srcs])
     real_srcs = unique_keep_order(real_srcs)
     real_srcs_make = " ".join(real_srcs)
@@ -1390,7 +1388,6 @@ def main() -> int:
                 tests_dir=args.tests_dir,
                 include_dir=args.include_dir,
                 stub_generated_dir=args.stub_generated_dir,
-                dependency_stub_sources=merged_doc.get("stub_sources", []),
                 extra_real_srcs=args.extra_real_src,
                 extra_cflags=args.extra_cflags,
                 extra_ldflags=args.extra_ldflags,
