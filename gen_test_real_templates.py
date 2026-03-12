@@ -747,26 +747,6 @@ def guess_failure_knob(dep_meta: dict, fn_ret_type: str) -> Dict[str, str]:
 
 
 def infer_dependency_metadata(deps: List[str], stub_generated_dir: str) -> List[dict]:
-    def build_stub_module_index(root_dir: str) -> Dict[str, List[str]]:
-        module_index: Dict[str, List[str]] = {}
-        if not root_dir or not os.path.isdir(root_dir):
-            return module_index
-
-        for walk_root, _, files in os.walk(root_dir):
-            for filename in files:
-                if not filename.endswith("_stub.h"):
-                    continue
-                rel_path = os.path.relpath(os.path.join(walk_root, filename), root_dir).replace("\\", "/")
-                module_name = filename[:-len("_stub.h")]
-                module_index.setdefault(module_name, []).append(rel_path)
-
-        for module_name in list(module_index.keys()):
-            module_index[module_name] = sorted(
-                module_index[module_name],
-                key=lambda p: (p.count("/"), len(p), p)
-            )
-        return module_index
-
     def resolve_stub_header_from_dep(dep_name: str, module_index: Dict[str, List[str]]) -> Optional[Tuple[str, str]]:
         tokens = dep_name.split("_")
         if not tokens:
@@ -786,7 +766,8 @@ def infer_dependency_metadata(deps: List[str], stub_generated_dir: str) -> List[
 
     meta = []
     seen = set()
-    stub_module_index = build_stub_module_index(stub_generated_dir)
+    stub_index = build_generated_stub_index(stub_generated_dir)
+    stub_module_index = stub_index["stub_h_by_module_name"]
 
     for dep in deps:
         if dep in seen:
@@ -821,6 +802,80 @@ def infer_dependency_metadata(deps: List[str], stub_generated_dir: str) -> List[
         })
 
     return meta
+
+
+def build_generated_stub_index(stub_generated_dir: str) -> dict:
+    index = {
+        "stub_h_by_module_name": {},
+        "stub_c_by_module_name": {},
+        "stub_h_set": set(),
+        "stub_c_set": set(),
+    }
+
+    if not stub_generated_dir or not os.path.isdir(stub_generated_dir):
+        return index
+
+    for walk_root, _, files in os.walk(stub_generated_dir):
+        for filename in files:
+            rel_path = os.path.relpath(os.path.join(walk_root, filename), stub_generated_dir).replace("\\", "/")
+
+            if filename.endswith("_stub.h"):
+                module_name = filename[:-len("_stub.h")]
+                index["stub_h_set"].add(rel_path)
+                index["stub_h_by_module_name"].setdefault(module_name, []).append(rel_path)
+                continue
+
+            if filename.endswith("_stub.c"):
+                module_name = filename[:-len("_stub.c")]
+                index["stub_c_set"].add(rel_path)
+                index["stub_c_by_module_name"].setdefault(module_name, []).append(rel_path)
+
+    for key in ("stub_h_by_module_name", "stub_c_by_module_name"):
+        for module_name, paths in list(index[key].items()):
+            index[key][module_name] = sorted(paths, key=lambda p: (p.count("/"), len(p), p))
+
+    return index
+
+
+def resolve_stub_c_from_called_functions(called_functions: List[str], stub_index: dict) -> List[str]:
+    module_map = stub_index.get("stub_c_by_module_name", {})
+    resolved = []
+
+    for dep_name in unique_keep_order(called_functions):
+        tokens = dep_name.split("_")
+        if not tokens:
+            continue
+
+        chosen = None
+        for i in range(len(tokens), 0, -1):
+            candidate = "_".join(tokens[:i])
+            if candidate in module_map:
+                chosen = module_map[candidate][0]
+                break
+
+        if chosen:
+            resolved.append(chosen)
+
+    return unique_keep_order(resolved)
+
+
+def extract_project_include_stub_candidates(source_text: str, stub_index: dict) -> List[str]:
+    candidates = []
+    stub_c_set = stub_index.get("stub_c_set", set())
+
+    for include_path in re.findall(r'^\s*#\s*include\s*[<"]([^">]+)[">]', source_text, flags=re.M):
+        include_norm = include_path.strip().replace("\\", "/")
+        if not include_norm.startswith("cortex/"):
+            continue
+        if not include_norm.endswith(".h"):
+            continue
+
+        rel_module_path = include_norm[len("cortex/"):]
+        stub_candidate = rel_module_path[:-2] + "_stub.c"
+        if stub_candidate in stub_c_set:
+            candidates.append(stub_candidate)
+
+    return unique_keep_order(candidates)
 
 
 def make_real_scenarios(fn: FunctionProto, dep_meta: List[dict]) -> List[dict]:
@@ -888,17 +943,22 @@ def build_default_scenario_doc(
     source_path: str,
     protos: List[FunctionProto],
     source_text: str,
-    stub_generated_dir: str
+    stub_generated_dir: str,
+    extra_stub_srcs: List[str],
 ) -> dict:
     module = sanitize_basename(header_path)
     functions = []
     all_stub_headers = []
     all_stub_sources = []
 
+    stub_index = build_generated_stub_index(stub_generated_dir)
+    called_stub_sources = []
+
     for fn in protos:
         body = find_function_body(source_text, fn.name)
         deps = extract_called_functions(body or "", fn.name)
         dep_meta = infer_dependency_metadata(deps, stub_generated_dir)
+        called_stub_sources.extend(resolve_stub_c_from_called_functions(deps, stub_index))
 
         all_stub_headers.extend([d["stub_header"] for d in dep_meta])
         all_stub_sources.extend([d["stub_source_path"] for d in dep_meta if os.path.exists(d["stub_source_path"])])
@@ -913,12 +973,36 @@ def build_default_scenario_doc(
             "scenarios": make_real_scenarios(fn, dep_meta)
         })
 
+    include_stub_sources = extract_project_include_stub_candidates(source_text, stub_index)
+
+    explicit_stub_sources = []
+    for path in extra_stub_srcs:
+        abs_path = path.replace("\\", "/")
+        try:
+            rel_path = os.path.relpath(abs_path, stub_generated_dir).replace("\\", "/")
+        except ValueError:
+            rel_path = abs_path
+
+        if rel_path in stub_index.get("stub_c_set", set()):
+            explicit_stub_sources.append(os.path.join(stub_generated_dir, rel_path).replace("\\", "/"))
+        elif os.path.exists(abs_path):
+            explicit_stub_sources.append(abs_path)
+
+    resolved_stub_sources = []
+    resolved_stub_sources.extend(
+        os.path.join(stub_generated_dir, rel).replace("\\", "/") for rel in called_stub_sources
+    )
+    resolved_stub_sources.extend(
+        os.path.join(stub_generated_dir, rel).replace("\\", "/") for rel in include_stub_sources
+    )
+    resolved_stub_sources.extend(explicit_stub_sources)
+
     return {
         "module": module,
         "header": header_path.replace("\\", "/"),
         "source": source_path.replace("\\", "/"),
         "stub_headers": unique_keep_order(all_stub_headers),
-        "stub_sources": unique_keep_order(all_stub_sources),
+        "stub_sources": unique_keep_order(all_stub_sources + resolved_stub_sources),
         "functions": functions
     }
 
@@ -1215,6 +1299,7 @@ def emit_makefile(
     tests_dir: str,
     include_dir: str,
     stub_generated_dir: str,
+    dependency_stub_sources: List[str],
     extra_real_srcs: List[str],
     extra_cflags: str,
     extra_ldflags: str,
@@ -1324,6 +1409,7 @@ def parse_args() -> argparse.Namespace:
         help='Header path to include for TEST_TOOLS_H macros, e.g. "tests/test_tools.h"',
     )
     ap.add_argument("--extra-real-src", action="append", default=[], help="Additional real source files to compile")
+    ap.add_argument("--extra-stub-src", action="append", default=[], help="Additional explicit stub source files to compile")
     ap.add_argument("--extra-cflags", default="", help="Extra CFLAGS for Makefile")
     ap.add_argument("--extra-ldflags", default="", help="Extra LDFLAGS for Makefile")
     ap.add_argument("--cmocka-lib", default="-lcmocka", help="cmocka linker flag")
@@ -1362,6 +1448,7 @@ def main() -> int:
             protos=protos,
             source_text=source_text,
             stub_generated_dir=args.stub_generated_dir,
+            extra_stub_srcs=args.extra_stub_src,
         )
 
         module = default_doc["module"]
